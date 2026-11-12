@@ -1,0 +1,294 @@
+customAttribute command (
+    apexlangName: command
+    attribute: 1
+    name: Command
+    type: selectList
+    validation {
+        required: true
+    }
+    appearance {
+        sequence: 10
+    }
+    default {
+        value: REFRESH_GRID
+    }
+    help {
+        helpText:
+            ```
+            Which Interactive Grid operation this action step performs. Affected Elements must target the grid's region.
+            ```
+    }
+
+    entry refreshSelected (
+        sequence: 20
+        display: "Refresh selected rows"
+        return: REFRESH_SELECTED
+        help {
+            helpText:
+                ```
+                Reloads only the selected rows from the database via the native "selection-refresh" action, without reloading the whole grid. Falls back to a full refresh if that action is not available.
+                ```
+        }
+    )
+
+    entry refreshGrid (
+        sequence: 30
+        display: "Refresh entire grid"
+        return: REFRESH_GRID
+        help {
+            helpText:
+                ```
+                Full grid refresh via the region's native refresh call. Use as a safe fallback when a surgical refresh does not apply.
+                ```
+        }
+    )
+
+    entry selectedAction (
+        sequence: 40
+        display: "Run server action on selected rows"
+        return: SELECTED_ACTION
+        help {
+            helpText:
+                ```
+                Calls a named AJAX Callback process, created by you on the page, with the primary keys of the selected rows. Use for bulk validate, approve, bulk update, etc.
+                ```
+        }
+    )
+
+    entry dependentColumnRefresh (
+        sequence: 50
+        display: "Recalculate dependent columns"
+        return: DEPENDENT_COLUMN_REFRESH
+        help {
+            helpText:
+                ```
+                Calls a named AJAX Callback process for the selected row, then surgically refreshes that row. The process receives x01 = the row's record id and x02 = a JSON object with the row's current values as shown in the grid (including unsaved edits); it must calculate from x02 and persist the result, because the refresh reloads the row from the database.
+                ```
+        }
+    )
+
+    entry spreadsheetPaste (
+        sequence: 70
+        display: "Enable spreadsheet paste, with type conversion"
+        return: SPREADSHEET_PASTE
+        help {
+            helpText:
+                ```
+                Run once on Page Load, with Affected Elements = an editable Interactive Grid. Converts spreadsheet data pasted into the grid (Ctrl+V, Ctrl+Shift+V, Actions menu Paste / Paste Insert) to each column's type before it is written: dates to the column format mask, numbers to the session format, switch values (TRUE/FALSE, Yes/No...) and select list / Popup LOV display values to return values. If the first pasted row is a header naming grid columns, columns are matched by name instead of by position.
+                ```
+        }
+    )
+
+)
+
+customAttribute server-action-name (
+    apexlangName: serverActionName
+    attribute: 2
+    name: "Server action / process name"
+    type: text
+    appearance {
+        sequence: 20
+    }
+    dependingOn {
+        attribute: @command/component
+        conditionType: inList
+        list: [
+            SELECTED_ACTION
+            DEPENDENT_COLUMN_REFRESH
+        ]
+    }
+    help {
+        helpText:
+            ```
+            Static name of the page/application "AJAX Callback" process to invoke. Applies to Run server action and Recalculate dependent columns. This plugin never contains app-specific PL/SQL; you author that process yourself.
+            ```
+    }
+)
+
+customAttribute preserve-selection (
+    apexlangName: preserveSelection
+    attribute: 3
+    name: "Preserve selection after refresh"
+    type: yesNo
+    appearance {
+        sequence: 30
+    }
+    default {
+        value: true
+    }
+    dependingOn {
+        attribute: @command/component
+        conditionType: inList
+        list: [
+            REFRESH_SELECTED
+            SELECTED_ACTION
+        ]
+    }
+    help {
+        helpText:
+            ```
+            When enabled, refreshes via the native "selection-refresh" action so the current selection is kept. When disabled, performs a full grid refresh and the selection is lost.
+            ```
+    }
+)
+
+customAttribute target-columns (
+    apexlangName: targetColumns
+    attribute: 4
+    name: "Target columns"
+    type: text
+    validation {
+        required: true
+    }
+    appearance {
+        sequence: 40
+    }
+    dependingOn {
+        attribute: @command/component
+        conditionType: =
+        value: DEPENDENT_COLUMN_REFRESH
+    }
+    help {
+        helpText:
+            ```
+            Comma-separated Interactive Grid column names that the server action recalculates. The server action receives the current row (x01 = record id, x02 = JSON of the row's current values, including unsaved edits) and must persist the recalculated values; the plugin then refreshes the row from the database so these columns show the new values.
+            ```
+    }
+)
+
+customAttribute source-date-format (
+    apexlangName: sourceDateFormat
+    attribute: 6
+    name: "Source date format"
+    type: text
+    validation {
+        required: true
+    }
+    appearance {
+        sequence: 60
+    }
+    default {
+        value: MM/DD/YYYY
+    }
+    dependingOn {
+        attribute: @command/component
+        conditionType: =
+        value: SPREADSHEET_PASTE
+    }
+    help {
+        helpText:
+            ```
+            Date format used by the spreadsheet the data is copied from, for example MM/DD/YYYY for a US-locale Google Sheet or DD/MM/YYYY for a Spanish one. Used for ambiguous values only: ISO dates (2026-10-15) are always recognized, and when a pasted column contains an unambiguous value (a day greater than 12) the day/month order is inferred from the data itself.
+            ```
+    }
+)
+
+customAttribute source-decimal-separator (
+    apexlangName: sourceDecimalSeparator
+    attribute: 7
+    name: "Source number format"
+    type: selectList
+    validation {
+        required: true
+    }
+    appearance {
+        sequence: 70
+    }
+    default {
+        value: DOT
+    }
+    dependingOn {
+        attribute: @command/component
+        conditionType: =
+        value: SPREADSHEET_PASTE
+    }
+    help {
+        helpText:
+            ```
+            Number format used by the spreadsheet the data is copied from. Used for ambiguous values only (1,234 or 1.234): when a pasted column contains a value that proves the decimal separator (1,5 or 1.234,56), it is inferred from the data itself. Numbers are written in the session's own format.
+            ```
+    }
+
+    entry dot (
+        sequence: 10
+        display: "1,234.56 (decimal point)"
+        return: DOT
+    )
+
+    entry comma (
+        sequence: 20
+        display: "1.234,56 (decimal comma)"
+        return: COMMA
+    )
+
+)
+
+customAttribute reject-on-errors (
+    apexlangName: rejectOnErrors
+    attribute: 8
+    name: "Reject paste on conversion errors"
+    type: yesNo
+    appearance {
+        sequence: 80
+    }
+    default {
+        value: false
+    }
+    dependingOn {
+        attribute: @command/component
+        conditionType: =
+        value: SPREADSHEET_PASTE
+    }
+    help {
+        helpText:
+            ```
+            When enabled, the whole paste is cancelled if any value cannot be converted, and an error lists the offending cells. When disabled (default), convertible values are pasted and the rest are left as-is so the grid flags them.
+            ```
+    }
+)
+
+customAttribute paste-mode (
+    apexlangName: pasteMode
+    attribute: 9
+    name: "Paste mode"
+    type: selectList
+    validation {
+        required: true
+    }
+    appearance {
+        sequence: 90
+    }
+    default {
+        value: REPLACE
+    }
+    dependingOn {
+        attribute: @command/component
+        conditionType: =
+        value: SPREADSHEET_PASTE
+    }
+    help {
+        helpText:
+            ```
+            Where pasted spreadsheet rows go. Replace existing rows: native behaviour, Ctrl+V overwrites from the current row and Ctrl+Shift+V or Actions > Paste Insert insert new rows below it. Insert below the current row: every paste of two or more cells adds new rows below the current row. Append after the last row: every paste of two or more cells adds new rows after the last loaded row, wherever the current cell is; with scroll pagination this is the last row loaded so far, not necessarily the end of the data. A single value is always pasted into the current cell. Insert modes need a grid that allows adding rows; otherwise nothing is pasted.
+            ```
+    }
+
+    entry replace (
+        sequence: 10
+        display: "Replace existing rows"
+        return: REPLACE
+    )
+
+    entry insert (
+        sequence: 20
+        display: "Insert below the current row"
+        return: INSERT
+    )
+
+    entry append (
+        sequence: 30
+        display: "Append after the last row"
+        return: APPEND
+    )
+
+)

@@ -1,0 +1,13 @@
+/*! IG PowerTools v1.12 | (c) 2026 Waykitech | MIT License | https://github.com/Waykitech/IG-PowerTools */
+.igpt-busy {
+  cursor: progress;
+  opacity: 0.85;
+  pointer-events: none;
+  transition: opacity 0.15s ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .igpt-busy {
+    transition: none;
+  }
+}

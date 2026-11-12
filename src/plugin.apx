@@ -1,0 +1,340 @@
+plugin igPowerTools (
+    name: IG PowerTools
+    staticId: IG_POWERTOOLS
+    type: dynamicAction
+    component {
+        standardAttributes: [
+            forRegion
+            affectedElementRequired
+            stopExecutionOnErrorAttr
+        ]
+    }
+    source {
+        plsqlCode:
+            ```plsql
+            PROCEDURE render (
+                p_dynamic_action IN apex_plugin.t_dynamic_action,
+                p_plugin         IN apex_plugin.t_plugin,
+                p_param          IN apex_plugin.t_dynamic_action_render_param,
+                p_result         IN OUT NOCOPY apex_plugin.t_dynamic_action_render_result
+            )
+            IS
+                l_command         VARCHAR2(40);
+                l_action          VARCHAR2(255);
+                l_preserve        BOOLEAN;
+                l_columns         VARCHAR2(4000);
+                l_source_date_fmt VARCHAR2(100);
+                l_source_decimal  VARCHAR2(10);
+                l_reject_errors   BOOLEAN;
+                l_paste_mode      VARCHAR2(10);
+                l_column_meta     CLOB;
+            BEGIN
+
+                l_command :=
+                    UPPER(
+                        p_dynamic_action.attributes.get_varchar2(
+                            'command',
+                            'REFRESH_GRID'
+                        )
+                    );
+
+                IF l_command NOT IN (
+                    'REFRESH_SELECTED', 'REFRESH_GRID'
+                  , 'SELECTED_ACTION', 'DEPENDENT_COLUMN_REFRESH'
+                  , 'SPREADSHEET_PASTE'
+                ) THEN
+                    l_command := 'REFRESH_GRID';
+                END IF;
+
+                l_action :=
+                    p_dynamic_action.attributes.get_varchar2(
+                        'server-action-name'
+                    );
+
+                l_preserve :=
+                    p_dynamic_action.attributes.get_boolean(
+                        'preserve-selection',
+                        TRUE
+                    );
+
+                l_columns :=
+                    p_dynamic_action.attributes.get_varchar2(
+                        'target-columns'
+                    );
+
+                l_source_date_fmt :=
+                    p_dynamic_action.attributes.get_varchar2(
+                        'source-date-format',
+                        'MM/DD/YYYY'
+                    );
+
+                l_source_decimal :=
+                    p_dynamic_action.attributes.get_varchar2(
+                        'source-decimal-separator',
+                        'DOT'
+                    );
+
+                l_reject_errors :=
+                    p_dynamic_action.attributes.get_boolean(
+                        'reject-on-errors',
+                        FALSE
+                    );
+
+                l_paste_mode :=
+                    UPPER(
+                        p_dynamic_action.attributes.get_varchar2(
+                            'paste-mode',
+                            'REPLACE'
+                        )
+                    );
+
+                IF l_paste_mode NOT IN ('REPLACE', 'INSERT', 'APPEND') THEN
+                    l_paste_mode := 'REPLACE';
+                END IF;
+
+                IF l_command = 'SPREADSHEET_PASTE' THEN
+                    p_result.ajax_identifier := apex_plugin.get_ajax_identifier;
+                END IF;
+
+                IF l_command = 'SPREADSHEET_PASTE'
+                   AND p_dynamic_action.affected_region_id IS NOT NULL
+                THEN
+                    SELECT json_objectagg(
+                               KEY name
+                               VALUE json_object(
+                                   'dataType'   VALUE data_type,
+                                   'itemType'   VALUE item_type,
+                                   'formatMask' VALUE format_mask
+                               )
+                               RETURNING CLOB
+                           )
+                      INTO l_column_meta
+                      FROM apex_appl_page_ig_columns
+                     WHERE application_id = apex_application.g_flow_id
+                       AND region_id      = p_dynamic_action.affected_region_id;
+                END IF;
+
+                p_result.function_name := 'master.igPowerTools.run';
+
+                p_result.function_param.open_object;
+                p_result.function_param.put('command', l_command);
+                p_result.function_param.put('actionName', l_action);
+                p_result.function_param.put('preserveSelection', l_preserve);
+                p_result.function_param.put('targetColumns', l_columns);
+                p_result.function_param.put('sourceDateFormat', l_source_date_fmt);
+                p_result.function_param.put('sourceDecimalSeparator', l_source_decimal);
+                p_result.function_param.put('rejectOnErrors', l_reject_errors);
+                p_result.function_param.put('pasteMode', l_paste_mode);
+                p_result.function_param.put('ajaxIdentifier', p_result.ajax_identifier);
+                p_result.function_param.put('columnMeta', dbms_lob.substr(l_column_meta, 32767, 1));
+                p_result.function_param.close_object;
+
+            END;
+
+            PROCEDURE ajax_lov_lookup (
+                p_dynamic_action IN apex_plugin.t_dynamic_action,
+                p_plugin         IN apex_plugin.t_plugin,
+                p_param          IN apex_plugin.t_dynamic_action_ajax_param,
+                p_result         IN OUT NOCOPY apex_plugin.t_dynamic_action_ajax_result
+            )
+            IS
+                c_max_values CONSTANT PLS_INTEGER := 1000;
+                c_max_rows   CONSTANT PLS_INTEGER := 100000;
+
+                TYPE t_map IS TABLE OF VARCHAR2(4000) INDEX BY VARCHAR2(4000);
+
+                l_column      VARCHAR2(128) := UPPER(apex_application.g_x01);
+                l_lov_type    VARCHAR2(30);
+                l_lov_id      NUMBER;
+                l_lov_source  VARCHAR2(32767);
+                l_unsupported VARCHAR2(200);
+                l_wanted      t_map;
+                l_found_r     t_map;
+                l_found_d     t_map;
+                l_ambiguous   t_map;
+                l_key         VARCHAR2(4000);
+                l_value       VARCHAR2(4000);
+                l_context     apex_exec.t_context;
+
+                FUNCTION norm (p_value IN VARCHAR2) RETURN VARCHAR2 IS
+                BEGIN
+                    RETURN LOWER(TRIM(REGEXP_REPLACE(p_value, '[[:space:]]+', ' ')));
+                END norm;
+
+                PROCEDURE consider (p_display IN VARCHAR2, p_return IN VARCHAR2) IS
+                    l_k VARCHAR2(4000);
+                BEGIN
+                    FOR i IN 1 .. 2 LOOP
+                        l_k := norm(CASE i WHEN 1 THEN p_display ELSE p_return END);
+                        IF l_k IS NOT NULL AND l_wanted.EXISTS(l_k) THEN
+                            IF NOT l_found_r.EXISTS(l_k) THEN
+                                l_found_r(l_k) := p_return;
+                                l_found_d(l_k) := p_display;
+                            ELSIF NVL(l_found_r(l_k), CHR(0)) <> NVL(p_return, CHR(0)) THEN
+                                l_ambiguous(l_k) := p_return;
+                            END IF;
+                        END IF;
+                    END LOOP;
+                END consider;
+
+                PROCEDURE consider_static (p_static IN VARCHAR2) IS
+                    l_entries apex_t_varchar2;
+                    l_pair    apex_t_varchar2;
+                BEGIN
+                    l_entries := apex_string.split(SUBSTR(p_static, INSTR(p_static, ':') + 1), ',');
+                    FOR i IN 1 .. l_entries.COUNT LOOP
+                        l_pair := apex_string.split(l_entries(i), ';');
+                        consider(l_pair(1), CASE WHEN l_pair.COUNT > 1 THEN l_pair(2) ELSE l_pair(1) END);
+                    END LOOP;
+                END consider_static;
+
+                PROCEDURE consider_query (p_sql IN VARCHAR2) IS
+                BEGIN
+                    l_context := apex_exec.open_query_context(
+                        p_location  => apex_exec.c_location_local_db,
+                        p_sql_query => p_sql,
+                        p_max_rows  => c_max_rows
+                    );
+                    WHILE apex_exec.next_row(l_context) LOOP
+                        consider(apex_exec.get_varchar2(l_context, 1), apex_exec.get_varchar2(l_context, 2));
+                    END LOOP;
+                    apex_exec.close(l_context);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        apex_exec.close(l_context);
+                        RAISE;
+                END consider_query;
+
+                PROCEDURE consider_shared_lov (p_lov_id IN NUMBER) IS
+                BEGIN
+                    FOR l IN (
+                        SELECT lov_type, source_type_code, location_code, list_of_values_query,
+                               table_owner, table_name, where_clause,
+                               return_column_name, display_column_name
+                          FROM apex_application_lovs
+                         WHERE application_id = apex_application.g_flow_id
+                           AND lov_id         = p_lov_id
+                    ) LOOP
+                        IF l.lov_type = 'Static' THEN
+                            FOR e IN (
+                                SELECT display_value, return_value
+                                  FROM apex_application_lov_entries
+                                 WHERE application_id = apex_application.g_flow_id
+                                   AND lov_id         = p_lov_id
+                            ) LOOP
+                                consider(e.display_value, e.return_value);
+                            END LOOP;
+                        ELSIF l.location_code <> 'LOCAL' THEN
+                            l_unsupported := 'shared LOV location ' || l.location_code;
+                        ELSIF l.source_type_code = 'LEGACY_SQL' THEN
+                            consider_query(l.list_of_values_query);
+                        ELSIF l.source_type_code = 'SQL' THEN
+                            consider_query(
+                                'select ' || dbms_assert.enquote_name(l.display_column_name, FALSE)
+                                || ', ' || dbms_assert.enquote_name(l.return_column_name, FALSE)
+                                || ' from (' || l.list_of_values_query || ')'
+                            );
+                        ELSIF l.source_type_code = 'TABLE' THEN
+                            consider_query(
+                                'select ' || dbms_assert.enquote_name(l.display_column_name, FALSE)
+                                || ', ' || dbms_assert.enquote_name(l.return_column_name, FALSE)
+                                || ' from '
+                                || CASE WHEN l.table_owner IS NOT NULL
+                                        THEN dbms_assert.enquote_name(l.table_owner, FALSE) || '.' END
+                                || dbms_assert.enquote_name(l.table_name, FALSE)
+                                || CASE WHEN l.where_clause IS NOT NULL
+                                        THEN ' where ' || l.where_clause END
+                            );
+                        ELSE
+                            l_unsupported := 'shared LOV source type ' || l.source_type_code;
+                        END IF;
+                    END LOOP;
+                END consider_shared_lov;
+
+            BEGIN
+                FOR i IN 1 .. LEAST(apex_application.g_f01.COUNT, c_max_values) LOOP
+                    l_key := norm(SUBSTR(apex_application.g_f01(i), 1, 4000));
+                    IF l_key IS NOT NULL THEN
+                        l_wanted(l_key) := l_key;
+                    END IF;
+                END LOOP;
+
+                BEGIN
+                    SELECT lov_type_code, lov_id, lov_source
+                      INTO l_lov_type, l_lov_id, l_lov_source
+                      FROM apex_appl_page_ig_columns
+                     WHERE application_id = apex_application.g_flow_id
+                       AND region_id      = p_dynamic_action.affected_region_id
+                       AND name           = l_column
+                       AND item_type      = 'NATIVE_POPUP_LOV';
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        l_unsupported := 'not a Popup LOV column of the target region';
+                END;
+
+                IF l_unsupported IS NULL AND l_wanted.COUNT > 0 THEN
+                    CASE l_lov_type
+                        WHEN 'SQL_QUERY' THEN consider_query(l_lov_source);
+                        WHEN 'STATIC'    THEN consider_static(l_lov_source);
+                        WHEN 'SHARED'    THEN consider_shared_lov(l_lov_id);
+                        ELSE l_unsupported := 'LOV type ' || l_lov_type;
+                    END CASE;
+                END IF;
+
+                apex_json.open_object;
+                apex_json.open_object('values');
+                FOR i IN 1 .. LEAST(apex_application.g_f01.COUNT, c_max_values) LOOP
+                    l_value := SUBSTR(apex_application.g_f01(i), 1, 4000);
+                    l_key   := norm(l_value);
+                    IF l_key IS NOT NULL
+                       AND l_found_r.EXISTS(l_key)
+                       AND NOT l_ambiguous.EXISTS(l_key)
+                    THEN
+                        apex_json.open_object(l_value);
+                        apex_json.write('r', l_found_r(l_key));
+                        apex_json.write('d', l_found_d(l_key));
+                        apex_json.close_object;
+                    END IF;
+                END LOOP;
+                apex_json.close_object;
+                apex_json.open_array('ambiguous');
+                FOR i IN 1 .. LEAST(apex_application.g_f01.COUNT, c_max_values) LOOP
+                    l_value := SUBSTR(apex_application.g_f01(i), 1, 4000);
+                    l_key   := norm(l_value);
+                    IF l_key IS NOT NULL AND l_ambiguous.EXISTS(l_key) THEN
+                        apex_json.write(l_value);
+                    END IF;
+                END LOOP;
+                apex_json.close_array;
+                IF l_unsupported IS NOT NULL THEN
+                    apex_json.write('unsupported', l_unsupported);
+                END IF;
+                apex_json.close_object;
+            END ajax_lov_lookup;
+
+            ```
+    }
+    callbacks {
+        renderProcedureName: render
+        ajaxProcedureName: ajax_lov_lookup
+    }
+    advanced {
+        category: execute
+    }
+    css {
+        fileUrls: #PLUGIN_FILES#ig-powertools.css
+    }
+    javaScript {
+        fileUrls: #PLUGIN_FILES#ig-powertools.js
+    }
+    information {
+        version: 1.12
+        aboutUrl: https://github.com/Waykitech/IG-PowerTools
+        helpText:
+            ```
+            Declarative Interactive Grid operations (spreadsheet paste with type conversion, refresh of the selected rows, server actions on the selection, dependent columns) as a single reusable Dynamic Action step. Add it as an action inside any Dynamic Action, with Affected Elements set to the target Interactive Grid's region.
+
+            Created and maintained by Waykitech. Released under the MIT License. Source code, documentation and issues: https://github.com/Waykitech/IG-PowerTools. Contact: info@waykitech.com.
+            ```
+    }
+)
